@@ -1,0 +1,176 @@
+        -:    0:Source:cache.c
+        -:    0:Graph:cache.gcno
+        -:    0:Data:cache.gcda
+        -:    0:Runs:389
+        -:    0:Programs:1
+        -:    1:/* -*- Mode: C; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
+        -:    2:#include <stdlib.h>
+        -:    3:#include <string.h>
+        -:    4:#include <inttypes.h>
+        -:    5:
+        -:    6:#ifndef NDEBUG
+        -:    7:#include <signal.h>
+        -:    8:#endif
+        -:    9:
+        -:   10:#include "cache.h"
+        -:   11:
+        -:   12:#ifndef NDEBUG
+        -:   13:const uint64_t redzone_pattern = 0xdeadbeefcafebabe;
+        -:   14:int cache_error = 0;
+        -:   15:#endif
+        -:   16:
+        -:   17:const int initial_pool_size = 64;
+        -:   18:
+      960:   19:cache_t* cache_create(const char *name, size_t bufsize, size_t align,
+        -:   20:                      cache_constructor_t* constructor,
+        -:   21:                      cache_destructor_t* destructor) {
+      960:   22:    cache_t* ret = calloc(1, sizeof(cache_t));
+      960:   23:    char* nm = strdup(name);
+      960:   24:    void** ptr = calloc(initial_pool_size, sizeof(void*));
+     1920:   25:    if (ret == NULL || nm == NULL || ptr == NULL ||
+      960:   26:        pthread_mutex_init(&ret->mutex, NULL) == -1) {
+    #####:   27:        free(ret);
+    #####:   28:        free(nm);
+    #####:   29:        free(ptr);
+    #####:   30:        return NULL;
+        -:   31:    }
+        -:   32:
+      960:   33:    ret->name = nm;
+      960:   34:    ret->ptr = ptr;
+      960:   35:    ret->freetotal = initial_pool_size;
+      960:   36:    ret->constructor = constructor;
+      960:   37:    ret->destructor = destructor;
+        -:   38:
+        -:   39:#ifndef NDEBUG
+      960:   40:    ret->bufsize = bufsize + 2 * sizeof(redzone_pattern);
+        -:   41:#else
+        -:   42:    ret->bufsize = bufsize;
+        -:   43:#endif
+        -:   44:
+      960:   45:    return ret;
+        -:   46:}
+        -:   47:
+       32:   48:void cache_set_limit(cache_t *cache, int limit) {
+       32:   49:    pthread_mutex_lock(&cache->mutex);
+       32:   50:    cache->limit = limit;
+       32:   51:    pthread_mutex_unlock(&cache->mutex);
+       32:   52:}
+        -:   53:
+        -:   54:static inline void* get_object(void *ptr) {
+        -:   55:#ifndef NDEBUG
+   457988:   56:    uint64_t *pre = ptr;
+   457988:   57:    return pre + 1;
+        -:   58:#else
+        -:   59:    return ptr;
+        -:   60:#endif
+        -:   61:}
+        -:   62:
+    #####:   63:void cache_destroy(cache_t *cache) {
+    #####:   64:    while (cache->freecurr > 0) {
+    #####:   65:        void *ptr = cache->ptr[--cache->freecurr];
+    #####:   66:        if (cache->destructor) {
+    #####:   67:            cache->destructor(get_object(ptr), NULL);
+        -:   68:        }
+    #####:   69:        free(ptr);
+        -:   70:    }
+    #####:   71:    free(cache->name);
+    #####:   72:    free(cache->ptr);
+    #####:   73:    pthread_mutex_destroy(&cache->mutex);
+    #####:   74:    free(cache);
+    #####:   75:}
+        -:   76:
+    #####:   77:void* cache_alloc(cache_t *cache) {
+        -:   78:    void *ret;
+    #####:   79:    pthread_mutex_lock(&cache->mutex);
+    #####:   80:    ret = do_cache_alloc(cache);
+    #####:   81:    pthread_mutex_unlock(&cache->mutex);
+    #####:   82:    return ret;
+        -:   83:}
+        -:   84:
+   457990:   85:void* do_cache_alloc(cache_t *cache) {
+        -:   86:    void *ret;
+        -:   87:    void *object;
+   457990:   88:    if (cache->freecurr > 0) {
+   456259:   89:        ret = cache->ptr[--cache->freecurr];
+   456259:   90:        object = get_object(ret);
+     1731:   91:    } else if (cache->limit == 0 || cache->total < cache->limit) {
+     1729:   92:        object = ret = malloc(cache->bufsize);
+     1729:   93:        if (ret != NULL) {
+     1729:   94:            object = get_object(ret);
+        -:   95:
+     1729:   96:            if (cache->constructor != NULL &&
+    #####:   97:                cache->constructor(object, NULL, 0) != 0) {
+    #####:   98:                free(ret);
+    #####:   99:                object = NULL;
+        -:  100:            }
+     1729:  101:            cache->total++;
+        -:  102:        }
+        -:  103:    } else {
+        -:  104:        object = NULL;
+        -:  105:    }
+        -:  106:
+        -:  107:#ifndef NDEBUG
+   457988:  108:    if (object != NULL) {
+        -:  109:        /* add a simple form of buffer-check */
+   457988:  110:        uint64_t *pre = ret;
+   457988:  111:        *pre = redzone_pattern;
+   457988:  112:        ret = pre+1;
+   457988:  113:        memcpy(((char*)ret) + cache->bufsize - (2 * sizeof(redzone_pattern)),
+        -:  114:               &redzone_pattern, sizeof(redzone_pattern));
+        -:  115:    }
+        -:  116:#endif
+        -:  117:
+   457990:  118:    return object;
+        -:  119:}
+        -:  120:
+    #####:  121:void cache_free(cache_t *cache, void *ptr) {
+    #####:  122:    pthread_mutex_lock(&cache->mutex);
+    #####:  123:    do_cache_free(cache, ptr);
+    #####:  124:    pthread_mutex_unlock(&cache->mutex);
+    #####:  125:}
+        -:  126:
+   457872:  127:void do_cache_free(cache_t *cache, void *ptr) {
+        -:  128:#ifndef NDEBUG
+        -:  129:    /* validate redzone... */
+   457872:  130:    if (memcmp(((char*)ptr) + cache->bufsize - (2 * sizeof(redzone_pattern)),
+        -:  131:               &redzone_pattern, sizeof(redzone_pattern)) != 0) {
+    #####:  132:        raise(SIGABRT);
+    #####:  133:        cache_error = 1;
+    #####:  134:        return;
+        -:  135:    }
+   457872:  136:    uint64_t *pre = ptr;
+   457872:  137:    --pre;
+   457872:  138:    if (*pre != redzone_pattern) {
+    #####:  139:        raise(SIGABRT);
+    #####:  140:        cache_error = -1;
+    #####:  141:        return;
+        -:  142:    }
+   457872:  143:    ptr = pre;
+        -:  144:#endif
+   457872:  145:    if (cache->limit != 0 && cache->limit < cache->total) {
+        -:  146:        /* Allow freeing in case the limit was revised downward */
+    #####:  147:        if (cache->destructor) {
+    #####:  148:            cache->destructor(ptr, NULL);
+        -:  149:        }
+    #####:  150:        free(ptr);
+    #####:  151:        cache->total--;
+   457872:  152:    } else if (cache->freecurr < cache->freetotal) {
+   457867:  153:        cache->ptr[cache->freecurr++] = ptr;
+        -:  154:    } else {
+        -:  155:        /* try to enlarge free connections array */
+        5:  156:        size_t newtotal = cache->freetotal * 2;
+        5:  157:        void **new_free = realloc(cache->ptr, sizeof(char *) * newtotal);
+        5:  158:        if (new_free) {
+        5:  159:            cache->freetotal = newtotal;
+        5:  160:            cache->ptr = new_free;
+        5:  161:            cache->ptr[cache->freecurr++] = ptr;
+        -:  162:        } else {
+    #####:  163:            if (cache->destructor) {
+    #####:  164:                cache->destructor(ptr, NULL);
+        -:  165:            }
+    #####:  166:            free(ptr);
+    #####:  167:            cache->total--;
+        -:  168:        }
+        -:  169:    }
+        -:  170:}
+        -:  171:

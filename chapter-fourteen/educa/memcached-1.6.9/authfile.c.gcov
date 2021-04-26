@@ -1,0 +1,125 @@
+        -:    0:Source:authfile.c
+        -:    0:Graph:authfile.gcno
+        -:    0:Data:authfile.gcda
+        -:    0:Runs:389
+        -:    0:Programs:1
+        -:    1:/* -*- Mode: C; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
+        -:    2:#include <stdio.h>
+        -:    3:#include <stdlib.h>
+        -:    4:#include <stdbool.h>
+        -:    5:#include <string.h>
+        -:    6:#include <sys/types.h>
+        -:    7:#include <sys/stat.h>
+        -:    8:#include <unistd.h>
+        -:    9:#include <inttypes.h>
+        -:   10:
+        -:   11:#include "authfile.h"
+        -:   12:#include "util.h"
+        -:   13:
+        -:   14:// TODO: frontend needs a refactor so this can avoid global objects.
+        -:   15:
+        -:   16:#define MAX_ENTRY_LEN 256
+        -:   17:// Not supposed to be a huge database!
+        -:   18:#define MAX_ENTRIES 8
+        -:   19:
+        -:   20:typedef struct auth_entry {
+        -:   21:    char *user;
+        -:   22:    size_t ulen;
+        -:   23:    char *pass;
+        -:   24:    size_t plen;
+        -:   25:} auth_t;
+        -:   26:
+        -:   27:auth_t main_auth_entries[MAX_ENTRIES];
+        -:   28:int entry_cnt = 0;
+        -:   29:char *main_auth_data = NULL;
+        -:   30:
+        1:   31:enum authfile_ret authfile_load(const char *file) {
+        -:   32:    struct stat sb;
+        1:   33:    char *auth_data = NULL;
+        -:   34:    auth_t auth_entries[MAX_ENTRIES];
+        -:   35:
+        1:   36:    FILE *pwfile = fopen(file, "r");
+        1:   37:    if (pwfile == NULL) {
+        -:   38:        return AUTHFILE_OPENFAIL;
+        2:   39:    } else if (fstat(fileno(pwfile), &sb)) {
+    #####:   40:        fclose(pwfile);
+    #####:   41:        return AUTHFILE_STATFAIL;
+        -:   42:    }
+        -:   43:
+        1:   44:    auth_data = calloc(1, sb.st_size);
+        -:   45:
+        1:   46:    char *auth_cur = auth_data;
+        1:   47:    auth_t *entry_cur = auth_entries;
+        1:   48:    int used = 0;
+        -:   49:
+        4:   50:    while ((fgets(auth_cur, MAX_ENTRY_LEN, pwfile)) != NULL) {
+        -:   51:        int x;
+        -:   52:        int found = 0;
+        -:   53:
+       17:   54:        for (x = 0; x < MAX_ENTRY_LEN; x++) {
+       19:   55:            if (!found && auth_cur[x] == ':') {
+        2:   56:                entry_cur->user = auth_cur;
+        2:   57:                entry_cur->ulen = x;
+        2:   58:                entry_cur->pass = &auth_cur[x+1];
+        2:   59:                found = 1;
+       17:   60:            } else if (found) {
+        -:   61:                // Find end of password.
+        9:   62:                if (auth_cur[x] == '\n' ||
+        7:   63:                    auth_cur[x] == '\r' ||
+        -:   64:                    auth_cur[x] == '\0') {
+        2:   65:                    entry_cur->plen = x - (entry_cur->ulen + 1);
+        2:   66:                    break;
+        -:   67:                }
+        -:   68:            }
+        -:   69:        }
+        -:   70:
+        -:   71:        // malformed line.
+        2:   72:        if (!found) {
+    #####:   73:            (void)fclose(pwfile);
+    #####:   74:            free(auth_data);
+    #####:   75:            return AUTHFILE_MALFORMED;
+        -:   76:        }
+        -:   77:
+        -:   78:        // FIXME: no silent truncation.
+        2:   79:        if (++used == MAX_ENTRIES) {
+        -:   80:            break;
+        -:   81:        }
+        -:   82:        // EOF
+        2:   83:        if (auth_cur[x] == '\0')
+        -:   84:            break;
+        -:   85:
+        2:   86:        auth_cur += x;
+        2:   87:        entry_cur++;
+        -:   88:    }
+        -:   89:
+        -:   90:    // swap the main pointer out now, so if there's an error reloading we
+        -:   91:    // don't break the existing authentication.
+        1:   92:    if (main_auth_data != NULL) {
+    #####:   93:        free(main_auth_data);
+        -:   94:    }
+        -:   95:
+        1:   96:    entry_cnt = used;
+        1:   97:    main_auth_data = auth_data;
+        1:   98:    memcpy(main_auth_entries, auth_entries, sizeof(auth_entries));
+        -:   99:
+        1:  100:    (void)fclose(pwfile);
+        -:  101:
+        1:  102:    return AUTHFILE_OK;
+        -:  103:}
+        -:  104:
+        -:  105:// if only loading the file could be this short...
+        3:  106:int authfile_check(const char *user, const char *pass) {
+        3:  107:    size_t ulen = strlen(user);
+        3:  108:    size_t plen = strlen(pass);
+        -:  109:
+        6:  110:    for (int x = 0; x < entry_cnt; x++) {
+        5:  111:        auth_t *e = &main_auth_entries[x];
+        8:  112:        if (ulen == e->ulen && plen == e->plen &&
+        6:  113:            safe_memcmp(user, e->user, e->ulen) &&
+        3:  114:            safe_memcmp(pass, e->pass, e->plen)) {
+        -:  115:            return 1;
+        -:  116:        }
+        -:  117:    }
+        -:  118:
+        -:  119:    return 0;
+        -:  120:}
